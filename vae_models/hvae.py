@@ -11,6 +11,7 @@ import numpy as np
 # ----------------------
 def reparameterize(mu, logvar):
     std = torch.exp(0.5 * logvar)
+    std = torch.clamp(std, min=1e-6)  
     eps = torch.randn_like(std)
     return mu + eps * std
 
@@ -59,6 +60,8 @@ class Decoder(nn.Module):
     def forward(self, z1, z2):
         h = torch.cat([z1, z2], dim=-1)
         h = F.relu(self.fc1(h))
+        out = self.fc_out(h)
+        out = torch.clamp(out, min=-10, max=10)
         return self.fc_out(h)  # Remove sigmoid for real-valued outputs
 
 # ----------------------
@@ -103,7 +106,11 @@ def evaluate_model(model, X_test_tensor, y_test, batch_size=128):
         loader = DataLoader(TensorDataset(X_test_tensor), batch_size=batch_size)
         for batch in loader:
             x = batch[0]
+
+            x = torch.clamp(x, min=-10, max=10)
+
             x_hat, _, _, _, _ = model(x)
+            x_hat = torch.clamp(x_hat, min=-10, max=10)
             errors = torch.mean((x - x_hat) ** 2, dim=1).cpu().numpy()
             recon_errors.extend(errors)
 
@@ -128,8 +135,12 @@ def train_models(X_train, X_test, y_test, input_dim, z1_list, z2_list, epoch_lis
     # Normalize data
     mean = X_train.mean(axis=0)
     std = X_train.std(axis=0)
-    X_train = (X_train - mean) / std
-    X_test = (X_test - mean) / std
+    eps = 1e-8  
+    std_adj = np.where(std == 0, eps, std)
+
+    X_train = (X_train - mean) / std_adj
+    X_test = (X_test - mean) / std_adj
+
 
     #convert numpy arrays into pytorch tensors
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)

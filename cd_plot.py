@@ -7,16 +7,21 @@ from scipy.stats import rankdata
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULTS_DIR = os.path.join(SCRIPT_DIR, "results")
+SUCCESS_DIR = os.path.join(RESULTS_DIR, "successful_datasets")
 
-def collect_all_auc_scores(results_dir="results"):
+def collect_all_auc_scores(success_dir=SUCCESS_DIR):
     auc_scores = {}
 
-    for dataset_folder in os.listdir(results_dir):
-        dataset_path = os.path.join(results_dir, dataset_folder)
+    if not os.path.isdir(success_dir):
+        print(f"[WARNING] Successful datasets folder '{success_dir}' not found.")
+        return auc_scores
+
+    for dataset_folder in os.listdir(success_dir):
+        dataset_path = os.path.join(success_dir, dataset_folder)
         if not os.path.isdir(dataset_path):
             continue
 
-        result_file = os.path.join(dataset_path, f"{dataset_folder}_benchmark_result.csv")
+        result_file = os.path.join(dataset_path, "benchmark_result.csv")
         if not os.path.isfile(result_file):
             continue
 
@@ -51,17 +56,17 @@ def generate_global_cd_plot(auc_scores):
         color_palette={model: "black" for model in model_names}
     )
 
-    plt.title("Global Critical Difference Plot (ROC AUC)", pad=10)
+    plt.title("Global Critical Difference Plot (ROC AUC) - Successful Datasets Only", pad=10)
     plt.tight_layout()
 
-    output_path = os.path.join(RESULTS_DIR, "global_cd_plot.png")
+    output_path = os.path.join(RESULTS_DIR, "global_cd_plot_successful_only.png")
     plt.savefig(output_path, dpi=300)
     plt.close()
     print(f"[INFO] Saved Global CD Plot to {output_path}")
 
 if __name__ == "__main__":
-    auc_scores = collect_all_auc_scores(RESULTS_DIR)
+    auc_scores = collect_all_auc_scores(SUCCESS_DIR)
     if auc_scores:
         generate_global_cd_plot(auc_scores)
     else:
-        print("[WARNING] No benchmark results found to generate Global CD plot.")
+        print("[WARNING] No benchmark results found in successful datasets to generate Global CD plot.")

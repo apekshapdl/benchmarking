@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import time
 import torch
+import json
 from torch.utils.data import DataLoader, TensorDataset
 from multiprocessing import Pool, cpu_count
 from vae_models.svae import SparseVAE, train_sparse_vae, evaluate_sparse_vae
@@ -129,8 +130,8 @@ def run_overcomplete_vae_default(x_train, x_test, y_test, dataset):
             latent_dim=latent_dim,
             epoch_num=100,
             batch_size=32,
-            lr=0.0005,
-            dropout_rate=0.1,
+            lr=0.001,
+            dropout_rate=0.01,
             beta=1.0,
             verbose=0
         )
@@ -143,7 +144,7 @@ def run_overcomplete_vae_default(x_train, x_test, y_test, dataset):
         scores = vae.decision_function(x_test)
         inference_time = time.time() - start_infer
 
-        scores = (scores - scores.min()) / (scores.max() - scores.min())
+        scores = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
         roc = roc_auc_score(y_test, scores)
         precision, recall, _ = precision_recall_curve(y_test, scores)
         pr = auc(recall, precision)
@@ -162,9 +163,9 @@ def run_overcomplete_vae_default(x_train, x_test, y_test, dataset):
         #save_summary(dataset, "over_complete", pd.DataFrame(result))
         return result
     except Exception as e:
-        print(f"[ERROR] Normal VAE failed on dataset {dataset}: {str(e)}")
+        print(f"[ERROR] Overcomplete VAE failed on dataset {dataset}: {str(e)}")
         return {
-            "model": "NormalVAE_Default",
+            "model": "OvercompleteVAE_Default",
             "roc_auc": 0,
             "pr_auc": 0,
             "train_time": 0,
@@ -176,8 +177,8 @@ def run_overcomplete_vae_default(x_train, x_test, y_test, dataset):
 #-----HIERARCHIECAL VAE-----
 def run_hvae_default(x_train, x_test, y_test, dataset):
     print("Running HVAE (Default)...")
-    input_dim = x_train.shape[1]
     try: 
+        input_dim = x_train.shape[1]
         start_train = time.time()
         results = train_models(
             X_train=x_train,
@@ -198,7 +199,7 @@ def run_hvae_default(x_train, x_test, y_test, dataset):
         X_test_tensor = torch.tensor(x_test, dtype=torch.float32)
         start_infer = time.time()
         recon_errors, _ = evaluate_model(model, X_test_tensor, y_test)
-        recon_errors = (recon_errors - recon_errors.min()) / (recon_errors.max() - recon_errors.min())
+        #recon_errors = (recon_errors - recon_errors.min()) / (recon_errors.max() - recon_errors.min() + 1e-8)
         #threshold, best_f1 = find_best_f1_threshold(y_test, recon_errors)
         #print(f"HVAE_Default - Optimal Threshold: {threshold:.4f}, Best F1 Score: {best_f1:.4f}")
 
@@ -527,89 +528,18 @@ def run_baseline_models(x_train, x_test, y_test, dataset):
         }
 
 
-def save_summary(file_name, model_name, df_result):
-    base_name = os.path.splitext(os.path.basename(file_name))[0]
-    folder_path = os.path.join(SCRIPT_DIR, "results", base_name)
-
-    os.makedirs(folder_path, exist_ok=True)
-    output_file = os.path.join(folder_path, f"{base_name}_{model_name}.csv")
+def save_summary(result_folder, file_name, df_result):
+    os.makedirs(result_folder, exist_ok=True)
+    output_file = os.path.join(result_folder, f"{file_name}.csv")
     df_result.to_csv(output_file, index=False)
-    print(f"[{base_name}] Saved summary to {output_file}")
+    print(f"[SAVED] Summary to {output_file}")
 
-
-def save_figures(fig, dataset_file, figure_name):
-    dataset_name = os.path.splitext(os.path.basename(dataset_file))[0]
-    folder_path = os.path.join(SCRIPT_DIR, "results", dataset_name)
-    os.makedirs(folder_path, exist_ok=True)
-
+def save_figures(fig, result_folder, figure_name):
+    os.makedirs(result_folder, exist_ok=True)
     image_filename = f"{figure_name}.png"
-    full_path = os.path.join(folder_path, image_filename)
+    full_path = os.path.join(result_folder, image_filename)
     fig.savefig(full_path, dpi=300, bbox_inches="tight")
-    print(f"[{dataset_name}] Saved plot: {full_path}")
-
-
-
-def collect_auc_scores(results_dir="results"):
-    if not os.path.exists(results_dir):
-        print(f"[WARNING] Results folder '{results_dir}' does not exist — no CD plot will be generated.")
-        return {}
-
-    auc_scores = {}
-
-    for dataset_folder in os.listdir(results_dir):
-        dataset_path = os.path.join(results_dir, dataset_folder)
-        if not os.path.isdir(dataset_path):
-            continue
-
-        result_file = os.path.join(dataset_path, f"{dataset_folder}_benchmark_result.csv")
-        if not os.path.isfile(result_file):
-            continue
-
-        df = pd.read_csv(result_file)
-        for _, row in df.iterrows():
-            model = row["model"]
-            roc_auc = row["roc_auc"]
-
-            if model not in auc_scores:
-                auc_scores[model] = {}
-            auc_scores[model][dataset_folder] = roc_auc
-
-    return auc_scores
-
-
-def generate_cd_plot(auc_scores, dataset_name, title="Critical Difference Plot (ROC AUC)"):
-
-    model_names = list(auc_scores.keys())
-    datasets = list(next(iter(auc_scores.values())).keys())
-    score_matrix = np.array([[auc_scores[model].get(dataset, 0.0) for model in model_names] for dataset in datasets])
-
-    # Compute ranks (higher AUC = better rank)
-    ranks = np.array([rankdata(-row) for row in score_matrix])
-    avg_ranks = np.mean(ranks, axis=0)
-
-    nemenyi_result = sp.posthoc_nemenyi_friedman(ranks)
-    ranks_series = pd.Series(avg_ranks, index=model_names)
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    sp.critical_difference_diagram(
-        ranks_series,
-        nemenyi_result,
-        ax=ax,
-        label_props={'fontsize': 14, 'fontweight': 'bold'},
-        elbow_props={"linewidth": 2},
-        color_palette={model: "black" for model in model_names}
-    )
-
-    plt.title(title, pad=10)
-    plt.tight_layout()
-
-    folder_path = os.path.join(SCRIPT_DIR, "results", dataset_name)
-    os.makedirs(folder_path, exist_ok=True)
-    output_path = os.path.join(folder_path, f"{dataset_name}_cd_plot.png")
-    plt.savefig(output_path, dpi=300)
-    plt.close()
-    print(f"[{dataset_name}] Saved CD plot to {output_path}")
-
+    print(f"[SAVED] Plot: {full_path}")
 
 
 def run_all_for_one_dataset(dataset):
@@ -617,25 +547,59 @@ def run_all_for_one_dataset(dataset):
         print(f"[PID {os.getpid()}] Processing: {dataset}")
 
         x_train, x_test, y_test = preprocess(dataset)
+        failed_models = []
+
+        #helper to check and record failure
+        def check_failure(result, model_name):
+            if result["roc_auc"] == 0:
+                failed_models.append({"model": model_name, "error": result.get("error", "Unknown (roc_auc=0)")})
 
         result_normal_default = run_normal_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_normal_default, "NormalVAE_Default")
+
         result_ocvae = run_overcomplete_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_ocvae, "OvercompleteVAE_Default")
+
         result_hvae = run_hvae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_hvae, "HVAE_Default")
+
         result_baseline_models = run_baseline_models(x_train, x_test, y_test, dataset)
+
         result_svae = run_sparse_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_svae, "SparseVAE")
+
         result_betavae = run_beta_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_betavae, "BetaVAE")
+        
         result_betatcvae = run_betatc_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_betatcvae, "BetaTCVAE")
+        
         result_cvae = run_cvae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_cvae, "ConditionalVAE")
+
         result_fvae = run_factor_vae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_fvae, "FactorVAE")
+
         result_dhvae = run_deep_hvae_default(x_train, x_test, y_test, dataset)
+        check_failure(result_dhvae, "DeepHVAE")
 
         vae_results = [result_normal_default, result_ocvae, result_hvae, result_betatcvae, result_betavae, result_cvae, result_fvae, result_svae, result_dhvae]
         #vae_results = [ result_hvae,  result_betavae,  result_fvae ]
 
+        # Determine result folder
+        dataset_name = os.path.splitext(os.path.basename(dataset))[0]
+        if len(failed_models) == 0:
+            print(f"[{dataset}] SUCCESS: All models ran fine.")
+            result_folder = os.path.join(SCRIPT_DIR, "results", "successful_datasets", dataset_name)
+        else:
+            print(f"[{dataset}] FAILED MODELS: {failed_models}")
+            result_folder = os.path.join(SCRIPT_DIR, "results", "failed_datasets", dataset_name)
+        os.makedirs(result_folder, exist_ok=True)
+
         # VAE-only outputs
         df_results = pd.DataFrame(vae_results)
         df_results.sort_values(by="roc_auc", ascending=False, inplace=True)
-        save_summary(dataset, "benchmark_result", df_results)
+        save_summary(result_folder, "benchmark_result", df_results)
 
         # VAE-only plots
         x = np.arange(len(df_results))
@@ -645,7 +609,7 @@ def run_all_for_one_dataset(dataset):
         combined_results = vae_results + result_baseline_models
         combined_df = pd.DataFrame(combined_results)
         combined_df.sort_values(by="roc_auc", ascending=False, inplace=True)
-        save_summary(dataset, "benchmark_with_baselines", combined_df)
+        save_summary(result_folder, "benchmark_with_baselines", combined_df)
 
         # Combined plots
         x_all = np.arange(len(combined_df))
@@ -659,7 +623,7 @@ def run_all_for_one_dataset(dataset):
             labels=labels,
             title="ROC AUC vs PR AUC",
             ylabel="Score",
-            file_name=dataset,
+            result_folder=result_folder,
             plot_name="roc_vs_pr_auc",
             color1="skyblue",
             color2="salmon"
@@ -673,7 +637,7 @@ def run_all_for_one_dataset(dataset):
             labels=labels,
             title="Inference Time vs Train timeper Model",
             ylabel="Seconds",
-            file_name=dataset,
+            result_folder=result_folder,
             plot_name="inference_time_vs_train_time",
             color1="seagreen",
             color2="skyblue"
@@ -686,18 +650,23 @@ def run_all_for_one_dataset(dataset):
             labels=labels_all,
             title="ROC AUC vs PR AUC (All Models)",
             ylabel="Score",
-            file_name=dataset,
+            result_folder=result_folder,
             plot_name="roc_vs_pr_auc_all",
             color1="skyblue",
             color2="salmon"
         )
 
-        auc_scores_dataset = {res["model"]: {dataset: res["roc_auc"]} for res in vae_results}
+        # Save failed models info if any
+        if len(failed_models) > 0:
+            with open(os.path.join(result_folder, "failed_models.json"), "w") as f:
+                json.dump(failed_models, f, indent=4)
 
-        generate_cd_plot(auc_scores_dataset, dataset_name=os.path.splitext(os.path.basename(dataset))[0])
-        
     except Exception as e:
         print(f"[FATAL ERROR] Skipping dataset {dataset} due to: {e}")
+        result_folder = os.path.join(SCRIPT_DIR, "results", "failed_datasets", os.path.splitext(os.path.basename(dataset))[0])
+        os.makedirs(result_folder, exist_ok=True)
+        with open(os.path.join(result_folder, "fatal_error.txt"), "w") as f:
+            f.write(str(e))
 
 
 def create_then_save(
@@ -706,30 +675,28 @@ def create_then_save(
     labels,
     title,
     ylabel,
-    file_name,
+    result_folder,
     plot_name,
     color1="skyblue",
     values2=None,
     color2="salmon"):
-    
+
     fig = plt.figure(figsize=(10, 5))
     width = 0.35
-
     if values2 is not None:
         plt.bar(x - width / 2, values1, width, label="ROC AUC", color=color1)
         plt.bar(x + width / 2, values2, width, label="PR AUC", color=color2)
         plt.legend()
     else:
         plt.bar(x, values1, color=color1)
-
     plt.xticks(x, labels, rotation=45)
     plt.ylabel(ylabel)
     plt.title(title)
     plt.grid(axis="y", linestyle="--", alpha=0.4)
     plt.tight_layout()
-    save_figures(fig, file_name, plot_name)
+    save_figures(fig, result_folder, plot_name)
     plt.close(fig)
-    
+
 
 
 def get_all_datasets(folder_path = ".", extension = ".npz"):

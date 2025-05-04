@@ -9,6 +9,7 @@ from sklearn.metrics import roc_auc_score, precision_recall_curve, auc as sk_auc
 # === Reparameterization ===
 def reparameterize(mu, logvar):
     std = torch.exp(0.5 * logvar)
+    std = torch.clamp(std, min=1e-6)  # prevent zero std -> avoid NaNs
     eps = torch.randn_like(std)
     return mu + eps * std
 
@@ -55,7 +56,11 @@ class DeepDecoder(nn.Module):
 
     def forward(self, z1, z2, z3):
         h = F.relu(self.fc(torch.cat([z1, z2, z3], dim=-1)))
-        return self.fc_out(h)
+        out = self.fc_out(h)
+        
+        # FINAL FIX: clamp decoder output to avoid large values
+        out = torch.clamp(out, min=-10, max=10)
+        return out
 
 # === Deep Hierarchical VAE ===
 class DeepHierarchicalVAE(nn.Module):
@@ -94,8 +99,11 @@ def loss_function(x, x_hat, mu1, logvar1, mu2, logvar2, mu3, logvar3, kl_weight=
 def train_models_deep_hvae(X_train, X_test, y_test, input_dim, z1_list, z2_list, z3_list, epoch_list, optimizer_type="adam"):
     mean = X_train.mean(axis=0)
     std = X_train.std(axis=0)
-    X_train = (X_train - mean) / std
-    X_test = (X_test - mean) / std
+    eps = 1e-8  
+    std_adj = np.where(std == 0, eps, std)
+
+    X_train = (X_train - mean) / std_adj
+    X_test = (X_test - mean) / std_adj
 
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
@@ -126,6 +134,7 @@ def train_models_deep_hvae(X_train, X_test, y_test, input_dim, z1_list, z2_list,
                             loss, _, _, _, _ = loss_function(x_batch, x_hat, mu1, logvar1, mu2, logvar2, mu3, logvar3, kl_weight)
                             optimizer.zero_grad()
                             loss.backward()
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # gradient clipping
                             optimizer.step()
 
                     recon_errors, roc_auc = evaluate_model_deep_hvae(model, X_test_tensor, y_test)
@@ -138,11 +147,11 @@ def train_models_deep_hvae(X_train, X_test, y_test, input_dim, z1_list, z2_list,
                         "epochs": epochs,
                         "optimizer": optimizer_type,
                         "roc_auc": roc_auc,
-                        "pr_auc" : pr_auc,
+                        "pr_auc": pr_auc,
                         "model": model
                     })
 
-                    print(f"z1: {z1_dim}, z2: {z2_dim}, z3: {z3_dim}, epochs: {epochs}, ROC AUC: {roc_auc:.4f}, PR AUC : {pr_auc:.4f}")
+                    print(f"z1: {z1_dim}, z2: {z2_dim}, z3: {z3_dim}, epochs: {epochs}, ROC AUC: {roc_auc:.4f}, PR AUC: {pr_auc:.4f}")
 
     return results
 
@@ -156,10 +165,17 @@ def evaluate_model_deep_hvae(model, X_test_tensor, y_test, batch_size=128):
         for batch in loader:
             x = batch[0]
             x_hat, *_ = model(x)
+
+            # Extra clamp for safety
+            x = torch.clamp(x, min=-10, max=10)
+            x_hat = torch.clamp(x_hat, min=-10, max=10)
+
             batch_errors = F.mse_loss(x_hat, x, reduction='none').mean(dim=1).cpu().numpy()
+            batch_errors = np.nan_to_num(batch_errors, nan=0.0, posinf=1e6, neginf=-1e6)
+
             recon_errors.extend(batch_errors)
 
-    recon_errors = np.array(recon_errors)
+    recon_errors = np.asarray(recon_errors).flatten().astype(np.float32)
     recon_errors = (recon_errors - recon_errors.min()) / (recon_errors.max() - recon_errors.min() + 1e-8)
 
     if np.isnan(recon_errors).any():
